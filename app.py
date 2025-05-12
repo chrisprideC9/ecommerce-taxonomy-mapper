@@ -60,6 +60,18 @@ def main():
     use_db = st.sidebar.checkbox("Use Database", value=True)
     use_sample_taxonomy = st.sidebar.checkbox("Use Sample Taxonomy", value=False)
     
+    # Initialize df_paths variable as None
+    df_paths = None
+    
+    # Connect to database if requested
+    conn = None
+    if use_db:
+        with st.spinner("Connecting to database..."):
+            conn = get_db_connection()
+            if conn:
+                st.info(f"Connected to database")
+                df_paths = load_taxonomy_paths_with_vectors(conn)
+    
     # File uploader
     uploaded_file = st.file_uploader("Upload Screaming Frog CSV", type=['csv'])
     
@@ -79,16 +91,7 @@ def main():
             st.error(f"Missing required columns: {', '.join(missing_columns)}")
             return
         
-        # Load taxonomy paths
-        df_paths = load_taxonomy_paths_with_vectors(conn)
-        
-        if use_db:
-            with st.spinner("Connecting to database..."):
-                conn = get_db_connection()
-                if conn:
-                    st.info(f"Connected to database")
-                    df_paths = load_taxonomy_paths_with_vectors(conn)
-        
+        # Load taxonomy paths if not already loaded
         if df_paths is None or df_paths.empty or use_sample_taxonomy:
             st.warning("Using sample taxonomy data")
             sample_file = "taxonomy_paths.csv"
@@ -237,7 +240,7 @@ def extract_url_segments(url):
     except Exception:
         return ""
 
-def find_best_taxonomy_match_with_vectors(url, title, description, df_paths, 
+def find_best_taxonomy_match_with_vectors(url, title, description, taxonomy_paths_df, 
                                           store_context=None, context_weight=2.0, 
                                           top_n=5, threshold=0.0):
     """Find the best matching taxonomy path using pre-computed vectors"""
@@ -263,16 +266,21 @@ def find_best_taxonomy_match_with_vectors(url, title, description, df_paths,
     product_vector = vectorize_text(cleaned_text)
     
     # Convert stored vectors from string to numpy arrays if needed
-    if isinstance(df_paths['vector'].iloc[0], str):
-        from utils.vector_utils import prepare_vectors
-        df_paths = prepare_vectors(df_paths, 'vector')
-        vector_column = 'content_vector'
+    if 'vector' in taxonomy_paths_df.columns and taxonomy_paths_df['vector'].iloc[0] is not None:
+        if isinstance(taxonomy_paths_df['vector'].iloc[0], str):
+            from utils.vector_utils import prepare_vectors
+            taxonomy_paths_df = prepare_vectors(taxonomy_paths_df, 'vector')
+            vector_column = 'content_vector'
+        else:
+            vector_column = 'vector'
     else:
+        # Generate vectors for paths
+        taxonomy_paths_df['vector'] = taxonomy_paths_df['full_path'].apply(vectorize_text)
         vector_column = 'vector'
     
     # Calculate similarities
     similarities = []
-    for idx, row in df_paths.iterrows():
+    for idx, row in taxonomy_paths_df.iterrows():
         category_vector = row[vector_column]
         if category_vector is not None:
             # Handle vector format
@@ -288,7 +296,7 @@ def find_best_taxonomy_match_with_vectors(url, title, description, df_paths,
             similarities.append(0)
     
     # Add similarities to dataframe
-    result_df = df_paths.copy()
+    result_df = taxonomy_paths_df.copy()
     result_df['similarity'] = similarities
     
     # Sort by similarity

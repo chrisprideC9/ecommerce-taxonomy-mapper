@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 import os
 from dotenv import load_dotenv
+import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -69,5 +70,106 @@ def load_taxonomy_paths(conn):
         return df_paths
     except Exception as e:
         st.error(f"Error loading taxonomy paths: {e}")
-        st.error("Please check that your database has a 'taxonomy_paths' table with 'id' and 'full_name' columns.")
+        st.error("Please check that your database has a 'category_paths' table with 'id' and 'full_name' columns.")
         return pd.DataFrame(columns=['id', 'full_path'])
+
+def load_taxonomy_paths_with_vectors(conn):
+    """Load all taxonomy paths with their vector representations from database"""
+    try:
+        cursor = conn.cursor()
+        
+        # First check if the category_paths table exists and has the expected columns
+        try:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'category_paths'
+                )
+            """)
+            
+            category_paths_exists = cursor.fetchone()[0]
+            
+            if not category_paths_exists:
+                st.error("The 'category_paths' table does not exist in the database.")
+                cursor.close()
+                return pd.DataFrame(columns=['id', 'full_path', 'vector'])
+                
+            # Check if the category_vectors table exists
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'category_vectors'
+                )
+            """)
+            
+            category_vectors_exists = cursor.fetchone()[0]
+            
+            if not category_vectors_exists:
+                st.warning("The 'category_vectors' table does not exist. Loading paths without vectors.")
+                df_paths = load_taxonomy_paths(conn)
+                df_paths['vector'] = None
+                return df_paths
+                
+            # Now attempt to join the tables
+            st.info("Joining category_paths and category_vectors tables...")
+            cursor.execute("""
+                SELECT cp.id, cp.full_name as full_path, cv.vector 
+                FROM category_paths cp
+                LEFT JOIN category_vectors cv ON cp.id = cv.id
+            """)
+            
+            combined_data = cursor.fetchall()
+            cursor.close()
+            
+            # Convert to DataFrame
+            df_paths = pd.DataFrame(combined_data, columns=['id', 'full_path', 'vector'])
+            
+            # Check if we got any vectors
+            if df_paths['vector'].isnull().all():
+                st.warning("No vectors found in the joined tables. Generating vectors...")
+                # Generate vectors for each path using the vectorize_text function
+                from utils.vector_utils import vectorize_text
+                
+                for idx, row in df_paths.iterrows():
+                    text = row['full_path']
+                    vector = vectorize_text(text)
+                    df_paths.at[idx, 'vector'] = vector
+            
+            return df_paths
+            
+        except Exception as e:
+            st.warning(f"Error joining tables: {e}")
+            st.warning("Attempting to load paths directly...")
+            
+            # Reset cursor for a new query
+            cursor.close()
+            cursor = conn.cursor()
+            
+            # Load paths without vectors
+            cursor.execute("""
+                SELECT id, full_name FROM category_paths
+            """)
+            
+            paths = cursor.fetchall()
+            cursor.close()
+            
+            # Convert to DataFrame
+            df_paths = pd.DataFrame(paths, columns=['id', 'full_path'])
+            
+            # Add empty vector column
+            df_paths['vector'] = None
+            
+            # Generate vectors for each path
+            st.info("Generating vectors for taxonomy paths...")
+            from utils.vector_utils import vectorize_text
+            
+            for idx, row in df_paths.iterrows():
+                text = row['full_path']
+                vector = vectorize_text(text)
+                df_paths.at[idx, 'vector'] = vector
+            
+            return df_paths
+            
+    except Exception as e:
+        st.error(f"Error loading taxonomy paths with vectors: {e}")
+        return pd.DataFrame(columns=['id', 'full_path', 'vector'])
