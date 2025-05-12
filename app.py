@@ -6,7 +6,7 @@ import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from utils.db_utils import get_db_connection, load_taxonomy_paths
+from utils.db_utils import get_db_connection, load_taxonomy_paths_with_vectors
 
 def main():
     st.set_page_config(page_title="E-commerce Taxonomy Mapper", page_icon="🏷️", layout="wide")
@@ -80,14 +80,14 @@ def main():
             return
         
         # Load taxonomy paths
-        df_paths = None
+        df_paths = load_taxonomy_paths_with_vectors(conn)
         
         if use_db:
             with st.spinner("Connecting to database..."):
                 conn = get_db_connection()
                 if conn:
                     st.info(f"Connected to database")
-                    df_paths = load_taxonomy_paths(conn)
+                    df_paths = load_taxonomy_paths_with_vectors(conn)
         
         if df_paths is None or df_paths.empty or use_sample_taxonomy:
             st.warning("Using sample taxonomy data")
@@ -237,57 +237,64 @@ def extract_url_segments(url):
     except Exception:
         return ""
 
-def find_best_taxonomy_match(url, title, description, taxonomy_paths_df, 
-                            store_context=None, context_weight=2.0, 
-                            top_n=5, threshold=0.0):
-    """Find the best matching taxonomy path with store context and filtering"""
+def find_best_taxonomy_match_with_vectors(url, title, description, df_paths, 
+                                          store_context=None, context_weight=2.0, 
+                                          top_n=5, threshold=0.0):
+    """Find the best matching taxonomy path using pre-computed vectors"""
+    from utils.vector_utils import vectorize_text
+    from sklearn.metrics.pairwise import cosine_similarity
+    import numpy as np
+    
     # Extract meaningful parts from URL
     url_segments = extract_url_segments(url)
     
-    # Combine all text data with appropriate weighting
-    # Title is given more weight (repeated twice)
-    combined_text = f"{url_segments} {title} {title} {description}"
+    # Combine all text data
+    combined_text = f"{' '.join(url_segments)} {title} {title} {description}"
     
-    # Add store context if provided, repeating based on weight
+    # Add store context if provided
     if store_context and store_context.strip():
-        # Repeat the context based on the weight
         context_repeat = max(1, int(context_weight))
         context_text = ' '.join([store_context] * context_repeat)
         combined_text = f"{combined_text} {context_text}"
     
     cleaned_text = clean_text(combined_text)
     
-    # Prepare taxonomy paths
-    if 'processed_path' not in taxonomy_paths_df.columns:
-        taxonomy_paths_df['processed_path'] = taxonomy_paths_df['full_path'].apply(clean_text)
+    # Create vector for the product text
+    product_vector = vectorize_text(cleaned_text)
     
-    # Create corpus with product and all taxonomy paths
-    corpus = list(taxonomy_paths_df['processed_path'])
-    corpus.append(cleaned_text)
-    
-    # Create TF-IDF vectorizer
-    vectorizer = TfidfVectorizer()
-    try:
-        tfidf_matrix = vectorizer.fit_transform(corpus)
-    except Exception as e:
-        st.error(f"Error creating TF-IDF matrix: {e}")
-        return pd.DataFrame(columns=['id', 'full_path', 'similarity'])
-    
-    # Get product vector (last in the corpus)
-    product_vector = tfidf_matrix[-1]
-    path_vectors = tfidf_matrix[:-1]
+    # Convert stored vectors from string to numpy arrays if needed
+    if isinstance(df_paths['vector'].iloc[0], str):
+        from utils.vector_utils import prepare_vectors
+        df_paths = prepare_vectors(df_paths, 'vector')
+        vector_column = 'content_vector'
+    else:
+        vector_column = 'vector'
     
     # Calculate similarities
-    similarities = cosine_similarity(product_vector, path_vectors).flatten()
+    similarities = []
+    for idx, row in df_paths.iterrows():
+        category_vector = row[vector_column]
+        if category_vector is not None:
+            # Handle vector format
+            if isinstance(category_vector, str):
+                # Parse string to vector if needed
+                import ast
+                category_vector = np.array(ast.literal_eval(category_vector))
+            
+            # Calculate cosine similarity
+            similarity = cosine_similarity([product_vector], [category_vector])[0][0]
+            similarities.append(similarity)
+        else:
+            similarities.append(0)
     
     # Add similarities to dataframe
-    result_df = taxonomy_paths_df.copy()
+    result_df = df_paths.copy()
     result_df['similarity'] = similarities
     
     # Sort by similarity
     result_df = result_df.sort_values('similarity', ascending=False)
     
-    # Filter by threshold if specified
+    # Filter by threshold
     if threshold > 0:
         result_df = result_df[result_df['similarity'] >= threshold]
     
@@ -303,7 +310,7 @@ def process_batch(batch, df_paths, store_context=None, context_weight=2.0,
             description = row.get('Meta Description 1', '')
             
             # Find matches
-            matches = find_best_taxonomy_match(
+            matches = find_best_taxonomy_match_with_vectors(
                 url=url,
                 title=title,
                 description=description,
