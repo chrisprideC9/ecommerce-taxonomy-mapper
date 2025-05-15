@@ -6,3 +6,6 @@ scikit-learn
 numpy
 openai
 python-dotenv
+faiss-cpu
+psutil
+plotly
